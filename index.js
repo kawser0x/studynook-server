@@ -4,7 +4,7 @@ dns.setServers(["8.8.8.8", "8.8.4.4"]);
 const express = require("express");
 const dotenv = require("dotenv");
 const cors = require("cors");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 dotenv.config();
 
@@ -30,11 +30,45 @@ async function run() {
     const db = client.db("studynook");
     const roomCollection = db.collection("roomcollections");
 
-    app.get("/rooms" , async (req,res) =>{
-        const result = await roomCollection.find().toArray();
-        res.json(result)
-    })
-    
+    app.get("/rooms", async (req, res) => {
+      const { search, amenities, floor, minPrice, maxPrice } = req.query;
+      const query = {};
+
+      if (search) {
+        query.name = { $regex: search, $options: "i" };
+      }
+
+      if (amenities) {
+        const amenitiesList = Array.isArray(amenities)
+          ? amenities
+          : amenities.split(",").map((a) => a.trim());
+        if (amenitiesList.length > 0) {
+          query.amenities = { $in: amenitiesList };
+        }
+      }
+
+      if (floor && floor !== "all") {
+        query.floor = floor;
+      }
+
+      if (minPrice || maxPrice) {
+        query.hourlyRate = {};
+        if (minPrice) query.hourlyRate.$gte = Number(minPrice);
+        if (maxPrice) query.hourlyRate.$lte = Number(maxPrice);
+      }
+
+      const result = await roomCollection.find(query).toArray();
+      res.json(result);
+    });
+
+    app.get("/rooms/:id", async (req, res) => {
+      const { id } = req.params;
+
+      const result = await roomCollection.findOne({ _id: new ObjectId(id) });
+
+      res.json(result);
+    });
+
     app.post("/rooms", async (req, res) => {
       const roomData = req.body;
       const result = await roomCollection.insertOne(roomData);
@@ -52,7 +86,7 @@ async function run() {
 }
 run().catch(console.dir);
 
-app.get("/", async(req, res) => {
+app.get("/", async (req, res) => {
   res.send("Hello World!");
 });
 
