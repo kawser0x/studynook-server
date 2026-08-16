@@ -30,6 +30,11 @@ async function run() {
     const db = client.db("studynook");
     const roomCollection = db.collection("roomcollections");
 
+    app.get("/rooms" , async (req,res) =>{
+        const result = await roomCollection.find().toArray();
+        res.json(result)
+    })
+    
     app.post("/rooms", async (req, res) => {
       const roomData = req.body;
       const result = await roomCollection.insertOne(roomData);
@@ -47,7 +52,7 @@ async function run() {
 }
 run().catch(console.dir);
 
-app.get("/", (req, res) => {
+app.get("/", async(req, res) => {
   res.send("Hello World!");
 });
 
