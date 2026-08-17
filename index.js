@@ -10,7 +10,7 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
-const PORT = process.env.PORT;
+const PORT = process.env.PORT || 5000;
 const uri = process.env.MONGODB_URI;
 
 app.use(express.json());
@@ -27,8 +27,12 @@ async function run() {
   try {
     await client.connect();
 
-    const db = client.db("studynook");
-    const roomCollection = db.collection("roomcollections");
+    const roomDb = client.db("studynook");
+    const bookingDb = client.db("studynook_bookings");
+
+    const roomCollection = roomDb.collection("roomcollections");
+    const userCollection = roomDb.collection("users");
+    const bookingCollection = bookingDb.collection("bookings");
 
     app.get("/rooms", async (req, res) => {
       const { search, amenities, floor, minPrice, maxPrice } = req.query;
@@ -63,9 +67,10 @@ async function run() {
 
     app.get("/rooms/:id", async (req, res) => {
       const { id } = req.params;
+      if (!ObjectId.isValid(id))
+        return res.status(400).json({ message: "Invalid ID" });
 
       const result = await roomCollection.findOne({ _id: new ObjectId(id) });
-
       res.json(result);
     });
 
@@ -83,17 +88,12 @@ async function run() {
         { _id: new ObjectId(id) },
         { $set: updatedFields },
       );
-
       res.send(result);
     });
 
     app.delete("/rooms/:id", async (req, res) => {
       const { id } = req.params;
-      const userEmail = req.headers["user-email"];
 
-      const room = await roomCollection.findOne({ _id: new ObjectId(id) });
-
-      const userCollection = db.collection("users");
       await userCollection.updateMany(
         { "bookings.roomId": id },
         { $pull: { bookings: { roomId: id } } },
@@ -103,13 +103,143 @@ async function run() {
       res.json(result);
     });
 
-    const result = await client.db("admin").command({ ping: 1 });
+    app.post("/bookings", async (req, res) => {
+      const {
+        roomId,
+        userId,
+        userEmail,
+        date,
+        startTime,
+        endTime,
+        totalCost,
+        specialNote,
+      } = req.body;
+
+      if (!roomId || !userEmail || !date || !startTime || !endTime) {
+        return res
+          .status(400)
+          .json({ message: "Missing required booking details." });
+      }
+
+      const conflict = await bookingCollection.findOne({
+        roomId,
+        date,
+        status: "confirmed",
+        $or: [
+          {
+            startTime: { $lt: endTime },
+            endTime: { $gt: startTime },
+          },
+        ],
+      });
+
+      if (conflict) {
+        return res.status(409).json({
+          message: "This room is already reserved for the selected time slot.",
+        });
+      }
+
+      const room = await roomCollection.findOne({ _id: new ObjectId(roomId) });
+      if (!room) {
+        return res.status(404).json({ message: "Room not found." });
+      }
+
+      const newBooking = {
+        roomId,
+        roomName: room.name,
+        roomImage: room.image,
+        userId: userId || "",
+        userEmail,
+        date,
+        startTime,
+        endTime,
+        totalCost: Number(totalCost),
+        specialNote: specialNote || "",
+        status: "confirmed",
+        createdAt: new Date(),
+      };
+
+      const bookingResult = await bookingCollection.insertOne(newBooking);
+
+      await roomCollection.updateOne(
+        { _id: new ObjectId(roomId) },
+        { $inc: { bookingCount: 1 } },
+      );
+
+      await userCollection.updateOne(
+        { email: userEmail },
+        {
+          $push: {
+            bookings: {
+              bookingId: bookingResult.insertedId.toString(),
+              roomId,
+            },
+          },
+        },
+      );
+
+      res.status(201).json({
+        message: "Room booked successfully!",
+        bookingId: bookingResult.insertedId,
+      });
+    });
+
+    app.get("/my-bookings", async (req, res) => {
+      const userEmail = req.headers["user-email"];
+      if (!userEmail) return res.json([]);
+
+      const userBookings = await bookingCollection
+        .find({ userEmail })
+        .sort({ createdAt: -1 })
+        .toArray();
+
+      res.json(userBookings);
+    });
+
+    app.patch("/bookings/:id/cancel", async (req, res) => {
+      const { id } = req.params;
+      const userEmail = req.headers["user-email"];
+
+      if (!ObjectId.isValid(id))
+        return res.status(400).json({ message: "Invalid Booking ID" });
+
+      const booking = await bookingCollection.findOne({
+        _id: new ObjectId(id),
+      });
+      if (!booking)
+        return res.status(404).json({ message: "Booking not found" });
+
+      if (booking.userEmail !== userEmail) {
+        return res
+          .status(403)
+          .json({ message: "Unauthorized to cancel this booking" });
+      }
+
+      await bookingCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: "cancelled", cancelledAt: new Date() } },
+      );
+
+      await userCollection.updateOne(
+        { email: userEmail },
+        { $pull: { bookings: { bookingId: id } } },
+      );
+
+      if (ObjectId.isValid(booking.roomId)) {
+        await roomCollection.updateOne(
+          { _id: new ObjectId(booking.roomId) },
+          { $inc: { bookingCount: -1 } },
+        );
+      }
+
+      res.json({ message: "Booking cancelled successfully" });
+    });
+
+    await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
     );
-    return result;
   } finally {
-    // await client.close();
   }
 }
 run().catch(console.dir);
