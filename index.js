@@ -11,7 +11,7 @@ dotenv.config();
 
 const app = express();
 app.use(cors());
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT ;
 const uri = process.env.MONGODB_URI;
 
 app.use(express.json());
@@ -24,31 +24,33 @@ const client = new MongoClient(uri, {
   },
 });
 
-const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`));
+const JWKS = createRemoteJWKSet(
+  new URL(`${process.env.CLIENT_URL}/api/auth/jwks`),
+);
 
 const verifyToken = async (req, res, next) => {
   const authHeader = req?.headers.authorization;
   if (!authHeader) {
-    return res.status(401).json({ message: "Unauthorized" });
+    return res.status(401).json({ message: "Unauthorized: Missing token" });
   }
   const token = authHeader.split(" ")[1];
   if (!token) {
-    return res.status(401).json({ message: "Unauthorized" });
+    return res.status(401).json({ message: "Unauthorized: Invalid format" });
   }
 
   try {
     const { payload } = await jwtVerify(token, JWKS);
-    console.log(payload);
+    req.user = payload; 
     next();
   } catch (error) {
-    return res.status(403).json({ message: "Forbidden" });
+    return res
+      .status(403)
+      .json({ message: "Forbidden: Invalid or expired token" });
   }
 };
 
 async function run() {
   try {
-    // await client.connect();
-
     const roomDb = client.db("studynook");
     const bookingDb = client.db("studynook_bookings");
 
@@ -87,34 +89,48 @@ async function run() {
       res.json(result);
     });
 
-    app.get("/rooms/:id", verifyToken, async (req, res) => {
+    app.get("/rooms/:id", async (req, res) => {
       const { id } = req.params;
       if (!ObjectId.isValid(id))
-        return res.status(400).json({ message: "Invalid ID" });
+        return res.status(400).json({ message: "Invalid Room ID" });
 
       const result = await roomCollection.findOne({ _id: new ObjectId(id) });
+      if (!result) return res.status(404).json({ message: "Room not found" });
       res.json(result);
     });
 
-    app.post("/rooms",verifyToken, async (req, res) => {
+    app.post("/rooms", verifyToken, async (req, res) => {
       const roomData = req.body;
       const result = await roomCollection.insertOne(roomData);
-      res.json(result);
+      res.status(201).json(result);
     });
 
-    app.patch("/rooms/:id", async (req, res) => {
+    app.patch("/rooms/:id", verifyToken, async (req, res) => {
       const { id } = req.params;
       const { _id, ...updatedFields } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid Room ID" });
+      }
 
       const result = await roomCollection.updateOne(
         { _id: new ObjectId(id) },
         { $set: updatedFields },
       );
-      res.send(result);
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ message: "Room not found" });
+      }
+
+      res.json({ message: "Room updated successfully", result });
     });
 
-    app.delete("/rooms/:id", async (req, res) => {
+    app.delete("/rooms/:id", verifyToken, async (req, res) => {
       const { id } = req.params;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid Room ID" });
+      }
 
       await userCollection.updateMany(
         { "bookings.roomId": id },
@@ -122,10 +138,10 @@ async function run() {
       );
 
       const result = await roomCollection.deleteOne({ _id: new ObjectId(id) });
-      res.json(result);
+      res.json({ message: "Room deleted successfully", result });
     });
 
-    app.post("/bookings", async (req, res) => {
+    app.post("/bookings", verifyToken, async (req, res) => {
       const {
         roomId,
         userId,
@@ -137,7 +153,9 @@ async function run() {
         specialNote,
       } = req.body;
 
-      if (!roomId || !userEmail || !date || !startTime || !endTime) {
+      const email = req.user?.email || userEmail;
+
+      if (!roomId || !email || !date || !startTime || !endTime) {
         return res
           .status(400)
           .json({ message: "Missing required booking details." });
@@ -170,8 +188,8 @@ async function run() {
         roomId,
         roomName: room.name,
         roomImage: room.image,
-        userId: userId || "",
-        userEmail,
+        userId: req.user?.sub || userId || "",
+        userEmail: email,
         date,
         startTime,
         endTime,
@@ -189,7 +207,7 @@ async function run() {
       );
 
       await userCollection.updateOne(
-        { email: userEmail },
+        { email },
         {
           $push: {
             bookings: {
@@ -206,8 +224,8 @@ async function run() {
       });
     });
 
-    app.get("/my-bookings", async (req, res) => {
-      const userEmail = req.headers["user-email"];
+    app.get("/my-bookings", verifyToken, async (req, res) => {
+      const userEmail = req.user?.email || req.headers["user-email"];
       if (!userEmail) return res.json([]);
 
       const userBookings = await bookingCollection
@@ -218,9 +236,9 @@ async function run() {
       res.json(userBookings);
     });
 
-    app.patch("/bookings/:id/cancel", async (req, res) => {
+    app.patch("/bookings/:id/cancel", verifyToken, async (req, res) => {
       const { id } = req.params;
-      const userEmail = req.headers["user-email"];
+      const userEmail = req.user?.email || req.headers["user-email"];
 
       if (!ObjectId.isValid(id))
         return res.status(400).json({ message: "Invalid Booking ID" });
@@ -257,9 +275,9 @@ async function run() {
       res.json({ message: "Booking cancelled successfully" });
     });
 
-    app.delete("/bookings/:id",verifyToken, async (req, res) => {
+    app.delete("/bookings/:id", verifyToken, async (req, res) => {
       const { id } = req.params;
-      const userEmail = req.headers["user-email"];
+      const userEmail = req.user?.email || req.headers["user-email"];
 
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({ message: "Invalid Booking ID" });
@@ -294,18 +312,13 @@ async function run() {
 
       res.json({ message: "Booking permanently deleted" });
     });
-
-    // await client.db("admin").command({ ping: 1 });
-    // console.log(
-    //   "Pinged your deployment. You successfully connected to MongoDB!",
-    // );
   } finally {
   }
 }
 run().catch(console.dir);
 
 app.get("/", async (req, res) => {
-  res.send("Hello World!");
+  res.send("StudyNook API Server is Running!");
 });
 
 app.listen(PORT, () => {
