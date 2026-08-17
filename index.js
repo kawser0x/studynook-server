@@ -5,6 +5,7 @@ const express = require("express");
 const dotenv = require("dotenv");
 const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { jwtVerify, createRemoteJWKSet } = require("jose-cjs");
 
 dotenv.config();
 
@@ -22,6 +23,27 @@ const client = new MongoClient(uri, {
     deprecationErrors: true,
   },
 });
+
+const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`));
+
+const verifyToken = async (req, res, next) => {
+  const authHeader = req?.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+  const token = authHeader.split(" ")[1];
+  if (!token) {
+    return res.status(401).json({ message: "Unauthorized" });
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, JWKS);
+    console.log(payload);
+    next();
+  } catch (error) {
+    return res.status(403).json({ message: "Forbidden" });
+  }
+};
 
 async function run() {
   try {
@@ -65,7 +87,7 @@ async function run() {
       res.json(result);
     });
 
-    app.get("/rooms/:id", async (req, res) => {
+    app.get("/rooms/:id", verifyToken, async (req, res) => {
       const { id } = req.params;
       if (!ObjectId.isValid(id))
         return res.status(400).json({ message: "Invalid ID" });
@@ -74,7 +96,7 @@ async function run() {
       res.json(result);
     });
 
-    app.post("/rooms", async (req, res) => {
+    app.post("/rooms",verifyToken, async (req, res) => {
       const roomData = req.body;
       const result = await roomCollection.insertOne(roomData);
       res.json(result);
@@ -233,6 +255,44 @@ async function run() {
       }
 
       res.json({ message: "Booking cancelled successfully" });
+    });
+
+    app.delete("/bookings/:id",verifyToken, async (req, res) => {
+      const { id } = req.params;
+      const userEmail = req.headers["user-email"];
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ message: "Invalid Booking ID" });
+      }
+
+      const booking = await bookingCollection.findOne({
+        _id: new ObjectId(id),
+      });
+      if (!booking) {
+        return res.status(404).json({ message: "Booking not found" });
+      }
+
+      if (booking.userEmail !== userEmail) {
+        return res
+          .status(403)
+          .json({ message: "Unauthorized to delete this booking" });
+      }
+
+      await bookingCollection.deleteOne({ _id: new ObjectId(id) });
+
+      await userCollection.updateOne(
+        { email: userEmail },
+        { $pull: { bookings: { bookingId: id } } },
+      );
+
+      if (booking.status === "confirmed" && ObjectId.isValid(booking.roomId)) {
+        await roomCollection.updateOne(
+          { _id: new ObjectId(booking.roomId) },
+          { $inc: { bookingCount: -1 } },
+        );
+      }
+
+      res.json({ message: "Booking permanently deleted" });
     });
 
     await client.db("admin").command({ ping: 1 });
